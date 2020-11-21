@@ -1,93 +1,77 @@
-#!/bin/sh
-set -e
+#!/bin/bash
+set -eo pipefail
 
 usage() {
-	this=$1
+	local this=$1
 	cat <<EOF
-$this: download go binaries for twpayne/chezmoi
+$this: download chezmoi and optionally run chezmoi init
 
-Usage: $this [-b] bindir [-d] [tag]
-  -b sets bindir or installation directory, Defaults to ./bin
+Usage: $this [-b bindir] [-d] [-t tag] [-- chezmoi-init-options]
+  -b sets the installation directory, default is ./bin
   -d turns on debug logging
-   [tag] is a tag from
-   https://github.com/twpayne/chezmoi/releases
-   If tag is missing, then the latest will be used.
+  -t sets the tag from https://github.com/twpayne/chezmoi/releases, default is latest
 EOF
 	exit 2
 }
 
 parse_args() {
-	#BINDIR is ./bin unless set be ENV
-	# over-ridden by flag below
-
 	BINDIR=${BINDIR:-./bin}
-	while getopts "b:dh?x" arg; do
+	while getopts "b:dh?t:x" arg; do
 		case "$arg" in
 		b) BINDIR="$OPTARG" ;;
 		d) log_set_priority 10 ;;
 		h | \?) usage "$0" ;;
+		t) TAG="$OPTARG" ;;
 		x) set -x ;;
 		esac
 	done
 	shift $((OPTIND - 1))
-	TAG=$1
+	EXECARGS=("$@")
 }
 # this function wraps all the destructive operations
 # if a curl|bash cuts off the end of the script due to
 # network, either nothing will happen or will syntax error
 # out preventing half-done work
 execute() {
+	local tmpdir
 	tmpdir=$(mktemp -d)
 	log_debug "downloading files into ${tmpdir}"
 	http_download "${tmpdir}/${TARBALL}" "${TARBALL_URL}"
 	http_download "${tmpdir}/${CHECKSUM}" "${CHECKSUM_URL}"
 	hash_sha256_verify "${tmpdir}/${TARBALL}" "${tmpdir}/${CHECKSUM}"
-	srcdir="${tmpdir}"
 	(cd "${tmpdir}" && untar "${TARBALL}")
 	test ! -d "${BINDIR}" && install -d "${BINDIR}"
-	for binexe in $BINARIES; do
-		if [ "$OS" = "windows" ]; then
-			binexe="${binexe}.exe"
-		fi
-		install "${srcdir}/${binexe}" "${BINDIR}/"
-		log_info "installed ${BINDIR}/${binexe}"
-	done
+	BINEXE="${BINARY}"
+	if [ "$OS" = "windows" ]; then
+		BINEXE="${BINEXE}.exe"
+	fi
+	install "${tmpdir}/${BINEXE}" "${BINDIR}/"
+	log_info "installed ${BINDIR}/${BINEXE}"
 	rm -rf "${tmpdir}"
+	test "${#EXECARGS[@]}" -ne 0 && exec "${BINEXE}" "${EXECARGS[@]}"
 }
-get_binaries() {
+platform_check() {
 	case "$PLATFORM" in
-	darwin/amd64) BINARIES="chezmoi" ;;
-	darwin/arm) BINARIES="chezmoi" ;;
-	darwin/arm64) BINARIES="chezmoi" ;;
-	darwin/ppc64) BINARIES="chezmoi" ;;
-	darwin/ppc64le) BINARIES="chezmoi" ;;
-	freebsd/386) BINARIES="chezmoi" ;;
-	freebsd/amd64) BINARIES="chezmoi" ;;
-	freebsd/arm) BINARIES="chezmoi" ;;
-	freebsd/arm64) BINARIES="chezmoi" ;;
-	freebsd/ppc64) BINARIES="chezmoi" ;;
-	freebsd/ppc64le) BINARIES="chezmoi" ;;
-	linux/386) BINARIES="chezmoi chezmoi" ;;
-	linux/amd64) BINARIES="chezmoi chezmoi" ;;
-	linux/arm) BINARIES="chezmoi" ;;
-	linux/arm64) BINARIES="chezmoi chezmoi" ;;
-	linux/ppc64) BINARIES="chezmoi" ;;
-	linux/ppc64le) BINARIES="chezmoi" ;;
-	openbsd/386) BINARIES="chezmoi" ;;
-	openbsd/amd64) BINARIES="chezmoi" ;;
-	openbsd/arm) BINARIES="chezmoi" ;;
-	openbsd/arm64) BINARIES="chezmoi" ;;
-	openbsd/ppc64) BINARIES="chezmoi" ;;
-	openbsd/ppc64le) BINARIES="chezmoi" ;;
-	windows/386) BINARIES="chezmoi" ;;
-	windows/amd64) BINARIES="chezmoi" ;;
-	windows/arm) BINARIES="chezmoi" ;;
-	windows/arm64) BINARIES="chezmoi" ;;
-	windows/ppc64) BINARIES="chezmoi" ;;
-	windows/ppc64le) BINARIES="chezmoi" ;;
+	darwin/amd64) return 0 ;;
+	freebsd/386) return 0 ;;
+	freebsd/amd64) return 0 ;;
+	freebsd/arm) return 0 ;;
+	freebsd/arm64) return 0 ;;
+	linux/386) return 0 ;;
+	linux/amd64) return 0 ;;
+	linux/arm) return 0 ;;
+	linux/arm64) return 0 ;;
+	linux/ppc64) return 0 ;;
+	linux/ppc64le) return 0 ;;
+	openbsd/386) return 0 ;;
+	openbsd/amd64) return 0 ;;
+	openbsd/arm) return 0 ;;
+	openbsd/arm64) return 0 ;;
+	windows/386) return 0 ;;
+	windows/amd64) return 0 ;;
 	*)
 		log_crit "platform $PLATFORM is not supported.  Make sure this script is up-to-date and file request at https://github.com/${PREFIX}/issues/new"
-		exit 1
+		return 1
 		;;
 	esac
 }
@@ -186,6 +170,7 @@ log_crit() {
 	echoerr "$(log_prefix)" "$(log_tag 2)" "$@"
 }
 uname_os() {
+	local os
 	os=$(uname -s | tr '[:upper:]' '[:lower:]')
 	case "$os" in
 	cygwin_nt*) os="windows" ;;
@@ -195,6 +180,7 @@ uname_os() {
 	echo "$os"
 }
 uname_arch() {
+	local arch
 	arch=$(uname -m)
 	case $arch in
 	x86_64) arch="amd64" ;;
@@ -202,13 +188,14 @@ uname_arch() {
 	i686) arch="386" ;;
 	i386) arch="386" ;;
 	aarch64) arch="arm64" ;;
-	armv5*) arch="armv5" ;;
-	armv6*) arch="armv6" ;;
-	armv7*) arch="armv7" ;;
+	armv5*) arch="arm" ;;
+	armv6*) arch="arm" ;;
+	armv7*) arch="arm" ;;
 	esac
 	echo ${arch}
 }
 uname_os_check() {
+	local os
 	os=$(uname_os)
 	case "$os" in
 	darwin) return 0 ;;
@@ -227,14 +214,13 @@ uname_os_check() {
 	return 1
 }
 uname_arch_check() {
+	local arch
 	arch=$(uname_arch)
 	case "$arch" in
 	386) return 0 ;;
 	amd64) return 0 ;;
 	arm64) return 0 ;;
-	armv5) return 0 ;;
-	armv6) return 0 ;;
-	armv7) return 0 ;;
+	arm) return 0 ;;
 	ppc64) return 0 ;;
 	ppc64le) return 0 ;;
 	mips) return 0 ;;
@@ -248,7 +234,7 @@ uname_arch_check() {
 	return 1
 }
 untar() {
-	tarball=$1
+	local tarball=$1
 	case "${tarball}" in
 	*.tar.gz | *.tgz) tar --no-same-owner -xzf "${tarball}" ;;
 	*.tar) tar --no-same-owner -xf "${tarball}" ;;
@@ -260,9 +246,10 @@ untar() {
 	esac
 }
 http_download_curl() {
-	local_file=$1
-	source_url=$2
-	header=$3
+	local local_file=$1
+	local source_url=$2
+	local header=$3
+	local code
 	if [ -z "$header" ]; then
 		code=$(curl -w '%{http_code}' -sL -o "$local_file" "$source_url")
 	else
@@ -275,9 +262,9 @@ http_download_curl() {
 	return 0
 }
 http_download_wget() {
-	local_file=$1
-	source_url=$2
-	header=$3
+	local local_file=$1
+	local source_url=$2
+	local header=$3
 	if [ -z "$header" ]; then
 		wget -q -O "$local_file" "$source_url"
 	else
@@ -297,36 +284,41 @@ http_download() {
 	return 1
 }
 http_copy() {
+	local tmp
 	tmp=$(mktemp)
 	http_download "${tmp}" "$1" "$2" || return 1
+	local body
 	body=$(cat "$tmp")
 	rm -f "${tmp}"
 	echo "$body"
 }
 github_release() {
-	owner_repo=$1
-	version=$2
+	local owner_repo=$1
+	local version=$2
 	test -z "$version" && version="latest"
+	local giturl
 	giturl="https://github.com/${owner_repo}/releases/${version}"
+	local json
 	json=$(http_copy "$giturl" "Accept:application/json")
 	test -z "$json" && return 1
+	local version
 	version=$(echo "$json" | tr -s '\n' ' ' | sed 's/.*"tag_name":"//' | sed 's/".*//')
 	test -z "$version" && return 1
 	echo "$version"
 }
 hash_sha256() {
-	TARGET=${1:-/dev/stdin}
+	local target=${1:-/dev/stdin}
 	if is_command gsha256sum; then
-		hash=$(gsha256sum "$TARGET") || return 1
+		hash=$(gsha256sum "$target") || return 1
 		echo "$hash" | cut -d ' ' -f 1
 	elif is_command sha256sum; then
-		hash=$(sha256sum "$TARGET") || return 1
+		hash=$(sha256sum "$target") || return 1
 		echo "$hash" | cut -d ' ' -f 1
 	elif is_command shasum; then
-		hash=$(shasum -a 256 "$TARGET" 2>/dev/null) || return 1
+		hash=$(shasum -a 256 "$target" 2>/dev/null) || return 1
 		echo "$hash" | cut -d ' ' -f 1
 	elif is_command openssl; then
-		hash=$(openssl -dst openssl dgst -sha256 "$TARGET") || return 1
+		hash=$(openssl -dst openssl dgst -sha256 "$target") || return 1
 		echo "$hash" | cut -d ' ' -f a
 	else
 		log_crit "hash_sha256 unable to find command to compute sha-256 hash"
@@ -334,21 +326,23 @@ hash_sha256() {
 	fi
 }
 hash_sha256_verify() {
-	TARGET=$1
-	checksums=$2
+	local target=$1
+	local checksums=$2
 	if [ -z "$checksums" ]; then
 		log_err "hash_sha256_verify checksum file not specified in arg2"
 		return 1
 	fi
-	BASENAME=${TARGET##*/}
-	want=$(grep "${BASENAME}" "${checksums}" 2>/dev/null | tr '\t' ' ' | cut -d ' ' -f 1)
+	local basename=${target##*/}
+	local want
+	want=$(grep "${basename}" "${checksums}" 2>/dev/null | tr '\t' ' ' | cut -d ' ' -f 1)
 	if [ -z "$want" ]; then
-		log_err "hash_sha256_verify unable to find checksum for '${TARGET}' in '${checksums}'"
+		log_err "hash_sha256_verify unable to find checksum for '${target}' in '${checksums}'"
 		return 1
 	fi
-	got=$(hash_sha256 "$TARGET")
+	local got
+	got=$(hash_sha256 "$target")
 	if [ "$want" != "$got" ]; then
-		log_err "hash_sha256_verify checksum for '$TARGET' did not verify ${want} vs $got"
+		log_err "hash_sha256_verify checksum for '$target' did not verify ${want} vs $got"
 		return 1
 	fi
 }
@@ -358,9 +352,9 @@ End of functions from https://github.com/client9/shlib
 ------------------------------------------------------------------------
 EOF
 
-PROJECT_NAME="chezmoi"
+PROJECT_NAME=chezmoi
 OWNER=twpayne
-REPO="chezmoi"
+REPO=chezmoi
 BINARY=chezmoi
 FORMAT=tar.gz
 OS=$(uname_os)
@@ -379,7 +373,7 @@ uname_arch_check "$ARCH"
 
 parse_args "$@"
 
-get_binaries
+platform_check
 
 tag_to_version
 
